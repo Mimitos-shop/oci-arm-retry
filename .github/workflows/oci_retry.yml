@@ -8,36 +8,83 @@ on:
 jobs:
   retry:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Install OCI SDK
-        run: pip install oci
+        run: pip install oci cryptography
 
       - name: Set up OCI Config
         env:
           OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+          OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
+          OCI_USER: ${{ secrets.OCI_USER }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
         run: |
           mkdir -p ~/.oci
-          # El bloque | de arriba es el que preserva los saltos de línea de la llave
-          printf "%s" "$OCI_PRIVATE_KEY" > ~/.oci/oci_api_key.pem
-          chmod 600 ~/.oci/oci_api_key.pem
-          
-          echo "${{ secrets.OCI_SSH_PUBLIC_KEY }}" > ~/.oci/ssh_key.pub
-          
-          echo "[DEFAULT]" > ~/.oci/config
-          echo "user=${{ secrets.OCI_USER }}" >> ~/.oci/config
-          echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
-          echo "tenancy=${{ secrets.OCI_TENANCY }}" >> ~/.oci/config
-          echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
-          echo "key_file=/home/runner/.oci/oci_api_key.pem" >> ~/.oci/config
-          echo "ssh_public_key_file=/home/runner/.oci/ssh_key.pub" >> ~/.oci/config
+
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+          from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+          key = os.environ["OCI_PRIVATE_KEY"]
+          key = key.replace("\\n", "\n").replace("\r\n", "\n")
+          key = key.lstrip("\ufeff").strip()
+
+          match = re.search(
+              r"-----BEGIN (?:RSA )?PRIVATE KEY-----.*?-----END (?:RSA )?PRIVATE KEY-----",
+              key,
+              re.S
+          )
+
+          if not match:
+              raise SystemExit("ERROR: No se encontro la clave PEM.")
+
+          pem = match.group(0) + "\n"
+
+          try:
+              load_pem_private_key(pem.encode("ascii"), password=None)
+          except Exception as e:
+              raise SystemExit("ERROR: Clave PEM invalida: " + type(e).__name__)
+
+          Path.home().joinpath(".oci/oci_api_key.pem").write_text(
+              pem, encoding="ascii"
+          )
+
+          os.chmod(str(Path.home() / ".oci/oci_api_key.pem"), 0o600)
+
+          ssh = os.environ["OCI_SSH_PUBLIC_KEY"].strip()
+          if not ssh:
+              raise SystemExit("ERROR: Falta OCI_SSH_PUBLIC_KEY")
+
+          Path.home().joinpath(".oci/ssh_key.pub").write_text(
+              ssh + "\n", encoding="utf-8"
+          )
+
+          print("OK: Clave privada validada.")
+          print("OK: Clave SSH guardada.")
+          PY
+
+          {
+            echo "[DEFAULT]"
+            echo "user=$OCI_USER"
+            echo "fingerprint=$OCI_FINGERPRINT"
+            echo "tenancy=$OCI_TENANCY"
+            echo "region=$OCI_REGION"
+            echo "key_file=/home/runner/.oci/oci_api_key.pem"
+            echo "ssh_public_key_file=/home/runner/.oci/ssh_key.pub"
+          } > ~/.oci/config
 
       - name: Run OCI retry script
         env:
