@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: '*/7 * * * *'
 
+concurrency:
+  group: oci-arm-retry
+  cancel-in-progress: true
+
 jobs:
   retry:
     runs-on: ubuntu-latest
