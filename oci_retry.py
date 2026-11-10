@@ -3,75 +3,50 @@ import os
 import time
 import datetime
 
-# ╔══════════════════════════════════════════════════════╗
-# ║  Target : VM.Standard.A1.Flex (ARM)                  ║
-# ║  Spec   : 2 OCPU / 12 GB RAM / 100 GB disk (default) ║
-# ║  Arch   : ARM (Ampere)                               ║
-# ║  Tier   : Oracle Always Free                         ║
-# ║  OS     : Canonical Ubuntu 24.04 (UBUNTU_VERSION)    ║
-# ╚══════════════════════════════════════════════════════╝
-
-# ─── Configuration ───────────────────────────────────────
 INSTANCE_NAME = "arm-server"
-UBUNTU_VERSION = "24.04"  # OS for the new instance: "24.04" (default), "26.04" or "22.04"
+UBUNTU_VERSION = "24.04"
 ARM_OCPUS = 2
 ARM_MEMORY_IN_GBS = 12
 BOOT_VOLUME_SIZE_IN_GBS = 100
-RETRY_INTERVAL = 90  # seconds
-# ────────────────────────────────────────────────────────
+RETRY_INTERVAL = 90
 
-# ─── OCI Authentication ──────────────────────────────────
-# [Local] Create a config file at ~/.oci/config (format: see README.md)
-#   key_file            -> your OCI API private key (.pem)
-#   ssh_public_key_file -> your SSH public key (.pub), installed on the new instance
-#
-# [GitHub Actions] No config file needed
-#   The workflow auto-creates it from GitHub Secrets — see README.md
-# ────────────────────────────────────────────────────────
 config = oci.config.from_file()
+COMPARTMENT_ID = os.environ.get("OCI_COMPARTMENT_ID", config["tenancy"])
 
-# Resources are created in the tenancy (root compartment) from the OCI config
-COMPARTMENT_ID = config["tenancy"]
+
+def log(message):
+    print(message, flush=True)
 
 
 def load_ssh_public_key():
-    """Read the SSH public key from the file set by ssh_public_key_file in the OCI config."""
     path = config.get("ssh_public_key_file")
+
     if not path:
-        raise SystemExit(
-            "No SSH public key: add ssh_public_key_file=<path to your .pub file> to your OCI config "
-            "(GitHub Actions: add the OCI_SSH_PUBLIC_KEY GitHub Secret)."
-        )
+        raise SystemExit("ERROR: Falta la ruta de la clave SSH pública.")
+
     path = os.path.expanduser(path)
-    try:
-        with open(path, encoding="utf-8-sig") as f:  # utf-8-sig also strips a BOM added by Notepad
-            key = f.read().strip()
-    except OSError as e:
-        raise SystemExit(f"Cannot read SSH public key file {path}: {e}")
-    if not key:
-        raise SystemExit(
-            f"SSH public key file is empty: {path} "
-            "(GitHub Actions: check the OCI_SSH_PUBLIC_KEY GitHub Secret)."
-        )
-    if "PRIVATE KEY" in key:
-        raise SystemExit(
-            f"{path} is a private key. Point ssh_public_key_file to your .pub file "
-            "(GitHub Actions: put the .pub contents in the OCI_SSH_PUBLIC_KEY GitHub Secret)."
-        )
+
+    with open(path, encoding="utf-8-sig") as file:
+        key = file.read().strip()
+
+    if not key or not key.startswith(("ssh-rsa ", "ssh-ed25519 ")):
+        raise SystemExit("ERROR: OCI_SSH_PUBLIC_KEY no es una clave SSH pública válida.")
+
     return key
 
 
 SSH_PUBLIC_KEY = load_ssh_public_key()
 
 
-def get_availability_domain():
+def get_availability_domains():
     identity = oci.identity.IdentityClient(config)
-    ads = identity.list_availability_domains(COMPARTMENT_ID).data
-    return ads[0].name
+    response = identity.list_availability_domains(COMPARTMENT_ID)
+    return [ad.name for ad in response.data]
 
 
 def get_ubuntu_arm_image():
     compute = oci.core.ComputeClient(config)
+
     images = compute.list_images(
         COMPARTMENT_ID,
         operating_system="Canonical Ubuntu",
@@ -80,25 +55,28 @@ def get_ubuntu_arm_image():
         sort_by="TIMECREATED",
         sort_order="DESC",
     ).data
+
     if not images:
-        raise Exception(f"Ubuntu {UBUNTU_VERSION} ARM image not found")
+        raise SystemExit(
+            f"ERROR: No se encontró imagen Ubuntu {UBUNTU_VERSION} para ARM."
+        )
+
     return images[0].id
 
 
 def create_vcn_and_subnet():
     network = oci.core.VirtualNetworkClient(config)
-    # Read-only lookups retry temporary errors (timeouts, 429, 5xx) with the SDK's
-    # default strategy, so a brief OCI hiccup at startup doesn't stop the script.
-    # Wrong OCIDs or keys (401/404) are not retried and still fail immediately.
     retry = oci.retry.DEFAULT_RETRY_STRATEGY
 
-    # Check if VCN already exists
     vcns = network.list_vcns(
-        COMPARTMENT_ID, display_name="retry-vcn", retry_strategy=retry
+        COMPARTMENT_ID,
+        display_name="retry-vcn",
+        retry_strategy=retry,
     ).data
+
     if vcns:
         vcn = vcns[0]
-        print(f"Using existing VCN: {vcn.id}")
+        log(f"Usando VCN existente: {vcn.id}")
     else:
         vcn = network.create_vcn(
             oci.core.models.CreateVcnDetails(
@@ -107,10 +85,19 @@ def create_vcn_and_subnet():
                 cidr_block="10.0.0.0/16",
             )
         ).data
-        print(f"Created VCN: {vcn.id}")
 
-        # Create Internet Gateway
-        ig = network.create_internet_gateway(
+        log(f"VCN creada: {vcn.id}")
+
+    gateways = network.list_internet_gateways(
+        COMPARTMENT_ID,
+        vcn_id=vcn.id,
+        retry_strategy=retry,
+    ).data
+
+    if gateways:
+        gateway = gateways[0]
+    else:
+        gateway = network.create_internet_gateway(
             oci.core.models.CreateInternetGatewayDetails(
                 compartment_id=COMPARTMENT_ID,
                 vcn_id=vcn.id,
@@ -119,53 +106,71 @@ def create_vcn_and_subnet():
             )
         ).data
 
-        # Update route table to allow outbound traffic
-        network.update_route_table(
-            vcn.default_route_table_id,
-            oci.core.models.UpdateRouteTableDetails(
-                route_rules=[
-                    oci.core.models.RouteRule(
-                        destination="0.0.0.0/0",
-                        network_entity_id=ig.id,
-                    )
-                ]
-            ),
-        )
+    network.update_route_table(
+        vcn.default_route_table_id,
+        oci.core.models.UpdateRouteTableDetails(
+            route_rules=[
+                oci.core.models.RouteRule(
+                    destination="0.0.0.0/0",
+                    network_entity_id=gateway.id,
+                )
+            ]
+        ),
+    )
 
-        # Open inbound ports: SSH / HTTP / HTTPS (add more ports to this list if needed)
-        security_lists = network.list_security_lists(
-            COMPARTMENT_ID, vcn_id=vcn.id, retry_strategy=retry
-        ).data
-        if security_lists:
-            existing_egress = security_lists[0].egress_security_rules
-            new_ingress = []
-            for port in [22, 80, 443]:
-                new_ingress.append(
+    security_lists = network.list_security_lists(
+        COMPARTMENT_ID,
+        vcn_id=vcn.id,
+        retry_strategy=retry,
+    ).data
+
+    if security_lists:
+        security_list = security_lists[0]
+
+        ingress = list(security_list.ingress_security_rules or [])
+
+        for port in [22, 80, 443]:
+            exists = any(
+                rule.protocol == "6"
+                and rule.tcp_options
+                and rule.tcp_options.destination_port_range
+                and rule.tcp_options.destination_port_range.min == port
+                and rule.tcp_options.destination_port_range.max == port
+                for rule in ingress
+            )
+
+            if not exists:
+                ingress.append(
                     oci.core.models.IngressSecurityRule(
                         protocol="6",
                         source="0.0.0.0/0",
                         tcp_options=oci.core.models.TcpOptions(
                             destination_port_range=oci.core.models.PortRange(
-                                min=port, max=port
+                                min=port,
+                                max=port,
                             )
                         ),
                     )
                 )
-            network.update_security_list(
-                security_lists[0].id,
-                oci.core.models.UpdateSecurityListDetails(
-                    ingress_security_rules=new_ingress,
-                    egress_security_rules=existing_egress,
-                ),
-            )
 
-    # Check if subnet already exists
+        network.update_security_list(
+            security_list.id,
+            oci.core.models.UpdateSecurityListDetails(
+                ingress_security_rules=ingress,
+                egress_security_rules=security_list.egress_security_rules,
+            ),
+        )
+
     subnets = network.list_subnets(
-        COMPARTMENT_ID, vcn_id=vcn.id, display_name="retry-subnet", retry_strategy=retry
+        COMPARTMENT_ID,
+        vcn_id=vcn.id,
+        display_name="retry-subnet",
+        retry_strategy=retry,
     ).data
+
     if subnets:
         subnet = subnets[0]
-        print(f"Using existing subnet: {subnet.id}")
+        log(f"Usando subnet existente: {subnet.id}")
     else:
         subnet = network.create_subnet(
             oci.core.models.CreateSubnetDetails(
@@ -176,14 +181,32 @@ def create_vcn_and_subnet():
                 prohibit_public_ip_on_vnic=False,
             )
         ).data
-        print(f"Created subnet: {subnet.id}")
+
+        log(f"Subnet creada: {subnet.id}")
 
     return subnet.id
 
 
+def check_existing_instance():
+    compute = oci.core.ComputeClient(config)
+
+    instances = compute.list_instances(
+        COMPARTMENT_ID,
+        display_name=INSTANCE_NAME,
+    ).data
+
+    for instance in instances:
+        if instance.lifecycle_state not in ["TERMINATED", "TERMINATING"]:
+            log(f"Ya existe una instancia: {instance.id}")
+            return True
+
+    return False
+
+
 def try_create_instance(subnet_id, ad_name, image_id):
     compute = oci.core.ComputeClient(config)
-    instance = compute.launch_instance(
+
+    return compute.launch_instance(
         oci.core.models.LaunchInstanceDetails(
             compartment_id=COMPARTMENT_ID,
             display_name=INSTANCE_NAME,
@@ -204,42 +227,63 @@ def try_create_instance(subnet_id, ad_name, image_id):
             metadata={"ssh_authorized_keys": SSH_PUBLIC_KEY},
         )
     ).data
-    return instance
 
 
 def main():
-    print("Initializing network configuration...")
+    log("Iniciando configuración de Oracle Cloud...")
+
+    if check_existing_instance():
+        log("No se creará otra instancia.")
+        return
+
     subnet_id = create_vcn_and_subnet()
 
-    print("Fetching availability domain...")
-    ad_name = get_availability_domain()
-    print(f"AD: {ad_name}")
+    availability_domains = get_availability_domains()
+    log(f"Dominios disponibles: {availability_domains}")
 
-    print(f"Fetching Ubuntu {UBUNTU_VERSION} ARM image...")
     image_id = get_ubuntu_arm_image()
-    print(f"Image ID: {image_id}")
+    log(f"Imagen Ubuntu ARM: {image_id}")
 
     attempt = 0
+
     while True:
+        if check_existing_instance():
+            log("La instancia ya existe. Finalizando.")
+            return
+
         attempt += 1
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"\n[{now}] Attempt #{attempt} to create instance...")
 
-        try:
-            instance = try_create_instance(subnet_id, ad_name, image_id)
-            print(f"\n✅ Success! Instance created")
-            print(f"   ID: {instance.id}")
-            print(f"   State: {instance.lifecycle_state}")
-            print(f"   Check Oracle Cloud Console for the public IP")
-            break
-        except oci.exceptions.ServiceError as e:
-            if "Out of host capacity" in str(e) or "capacity" in str(e).lower():
-                print(f"❌ Out of capacity, retrying...")
-            else:
-                print(f"❌ API error: {e.message}, retrying...")
-        except Exception as e:
-            print(f"⚠️ Network timeout or other error, retrying... ({type(e).__name__})")
+        log(f"\n[{now}] Intento #{attempt}")
 
+        for ad_name in availability_domains:
+            try:
+                log(f"Probando dominio: {ad_name}")
+
+                instance = try_create_instance(
+                    subnet_id,
+                    ad_name,
+                    image_id,
+                )
+
+                log("¡INSTANCIA CREADA CORRECTAMENTE!")
+                log(f"ID: {instance.id}")
+                log(f"Estado: {instance.lifecycle_state}")
+                return
+
+            except oci.exceptions.ServiceError as error:
+                message = str(error.message)
+
+                if (
+                    "capacity" in message.lower()
+                    or "out of host" in message.lower()
+                ):
+                    log(f"Sin capacidad en {ad_name}.")
+                    continue
+
+                raise
+
+        log(f"Sin capacidad en los dominios. Esperando {RETRY_INTERVAL} segundos.")
         time.sleep(RETRY_INTERVAL)
 
 
