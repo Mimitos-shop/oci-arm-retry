@@ -25,15 +25,21 @@ jobs:
           mkdir -p ~/.oci
           echo "${{ secrets.OCI_PRIVATE_KEY }}" | base64 -d > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem
+          
+          # Aquí guardamos la llave pública
+          echo "${{ secrets.OCI_SSH_PUBLIC_KEY }}" > ~/.oci/ssh_key.pub
+          
           echo "[DEFAULT]" > ~/.oci/config
           echo "user=${{ secrets.OCI_USER }}" >> ~/.oci/config
           echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
           echo "tenancy=${{ secrets.OCI_TENANCY }}" >> ~/.oci/config
           echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
           echo "key_file=/home/runner/.oci/oci_api_key.pem" >> ~/.oci/config
+          
+          # Aquí le decimos al script dónde está la llave pública
+          echo "ssh_public_key_file=/home/runner/.oci/ssh_key.pub" >> ~/.oci/config
 
       - name: Run OCI retry script
         env:
           OCI_COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
-          OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
         run: python oci_retry.py
