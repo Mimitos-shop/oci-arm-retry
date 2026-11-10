@@ -21,12 +21,14 @@ jobs:
         run: pip install oci
 
       - name: Set up OCI Config
+        env:
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
         run: |
           mkdir -p ~/.oci
-          echo "${{ secrets.OCI_PRIVATE_KEY }}" | base64 -d > ~/.oci/oci_api_key.pem
+          # El bloque | de arriba es el que preserva los saltos de línea de la llave
+          printf "%s" "$OCI_PRIVATE_KEY" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem
           
-          # Aquí guardamos la llave pública
           echo "${{ secrets.OCI_SSH_PUBLIC_KEY }}" > ~/.oci/ssh_key.pub
           
           echo "[DEFAULT]" > ~/.oci/config
@@ -35,8 +37,6 @@ jobs:
           echo "tenancy=${{ secrets.OCI_TENANCY }}" >> ~/.oci/config
           echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
           echo "key_file=/home/runner/.oci/oci_api_key.pem" >> ~/.oci/config
-          
-          # Aquí le decimos al script dónde está la llave pública
           echo "ssh_public_key_file=/home/runner/.oci/ssh_key.pub" >> ~/.oci/config
 
       - name: Run OCI retry script
