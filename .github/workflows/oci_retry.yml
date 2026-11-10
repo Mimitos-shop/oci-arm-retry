@@ -34,45 +34,33 @@ jobs:
 
           python - <<'PY'
           import os
-          import re
+          import base64
           from pathlib import Path
           from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-          key = os.environ["OCI_PRIVATE_KEY"]
-          key = key.replace("\\n", "\n").replace("\r\n", "\n")
-          key = key.lstrip("\ufeff").strip()
-
-          match = re.search(
-              r"-----BEGIN (?:RSA )?PRIVATE KEY-----.*?-----END (?:RSA )?PRIVATE KEY-----",
-              key,
-              re.S
-          )
-
-          if not match:
-              raise SystemExit("ERROR: No se encontro la clave PEM.")
-
-          pem = match.group(0) + "\n"
+          encoded = os.environ["OCI_PRIVATE_KEY"].strip()
 
           try:
-              load_pem_private_key(pem.encode("ascii"), password=None)
+              pem = base64.b64decode(encoded, validate=True)
+              load_pem_private_key(pem, password=None)
           except Exception as e:
-              raise SystemExit("ERROR: Clave PEM invalida: " + type(e).__name__)
+              raise SystemExit(
+                  "ERROR: No se pudo decodificar o validar la clave privada: "
+                  + type(e).__name__
+              )
 
-          Path.home().joinpath(".oci/oci_api_key.pem").write_text(
-              pem, encoding="ascii"
-          )
-
-          os.chmod(str(Path.home() / ".oci/oci_api_key.pem"), 0o600)
+          key_path = Path.home() / ".oci/oci_api_key.pem"
+          key_path.write_bytes(pem)
+          os.chmod(key_path, 0o600)
 
           ssh = os.environ["OCI_SSH_PUBLIC_KEY"].strip()
           if not ssh:
               raise SystemExit("ERROR: Falta OCI_SSH_PUBLIC_KEY")
 
-          Path.home().joinpath(".oci/ssh_key.pub").write_text(
-              ssh + "\n", encoding="utf-8"
-          )
+          ssh_path = Path.home() / ".oci/ssh_key.pub"
+          ssh_path.write_text(ssh + "\n", encoding="utf-8")
 
-          print("OK: Clave privada validada.")
+          print("OK: Clave privada validada y guardada.")
           print("OK: Clave SSH guardada.")
           PY
 
