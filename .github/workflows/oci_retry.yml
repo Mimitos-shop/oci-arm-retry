@@ -1,128 +1,37 @@
 name: OCI ARM Retry
 
 on:
-  workflow_dispatch:  # Manual trigger only
-
-concurrency:
-  group: oci-retry            # Only one Job allowed per group
-  cancel-in-progress: false   # Do not cancel running jobs; new ones queue (max 1 running + 1 waiting)
+  workflow_dispatch:
+  schedule:
+    - cron: '*/7 * * * *'
 
 jobs:
   retry:
     runs-on: ubuntu-latest
-    timeout-minutes: 355      # Close to GitHub Actions 6-hour limit
-    permissions:
-      actions: write          # Lets the built-in GITHUB_TOKEN trigger the next Job / disable this workflow
-      contents: read          # Needed by actions/checkout
-
     steps:
-      # Actions are pinned to full commit SHAs (tags can be moved; SHAs cannot).
-      # To upgrade: look up the new release tag's commit SHA and update both the SHA and the comment.
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false  # Job never pushes; don't persist the token on the runner
+      - name: Checkout code
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
       - name: Install OCI SDK
         run: pip install oci
 
-      - name: Set up OCI credentials
-        env:
-          OCI_USER:        ${{ secrets.OCI_USER }}
-          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
-          OCI_TENANCY:     ${{ secrets.OCI_TENANCY }}
-          OCI_REGION:      ${{ secrets.OCI_REGION }}
-          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
-          OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
+      - name: Decode Key
         run: |
-          mkdir -p ~/.oci
-
-          # Write API private key
-          printf '%s' "$OCI_PRIVATE_KEY" > ~/.oci/oci_api_key.pem
-          chmod 600 ~/.oci/oci_api_key.pem
-
-          # Write SSH public key (installed on the new instance)
-          printf '%s\n' "$OCI_SSH_PUBLIC_KEY" > ~/.oci/ssh_public_key.pub
-
-          # Write config (file paths are absolute)
-          cat > ~/.oci/config << EOF
-          [DEFAULT]
-          user=$OCI_USER
-          fingerprint=$OCI_FINGERPRINT
-          tenancy=$OCI_TENANCY
-          region=$OCI_REGION
-          key_file=/home/runner/.oci/oci_api_key.pem
-          ssh_public_key_file=/home/runner/.oci/ssh_public_key.pub
-          EOF
+          echo "${{ secrets.OCI_PRIVATE_KEY }}" | base64 -d > key.pem
+          chmod 600 key.pem
 
       - name: Run OCI retry script
-        # Exit 0          → instance created → auto-disable the workflow
-        # Exit 124        → time limit reached (no capacity yet) → trigger next Job
-        # Any other exit  → script error (e.g. wrong secrets/OCID) → stop the chain
-        # timeout 19800s = 330 min, 25 min less than job timeout 355 min (buffer for setup steps)
-        id: run_script
-        continue-on-error: true
         env:
-          PYTHONUNBUFFERED: "1"
-        run: |
-          set +e
-          timeout 19800 python oci_retry.py
-          code=$?
-          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          exit $code
-
-      # Relay / disable use the job's built-in GITHUB_TOKEN (no PAT needed):
-      # workflow_dispatch is an allowed exception to "GITHUB_TOKEN events don't start new runs".
-      # curl -f makes the step fail (red) on HTTP errors instead of silently passing.
-      - name: Auto-disable workflow on success
-        if: steps.run_script.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          curl -fsS -X PUT \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/$REPO/actions/workflows/oci_retry.yml/disable" || {
-            echo "::error title=Auto-disable failed::Instance was created successfully, but auto-disabling this workflow failed. Disable it manually: Actions tab > OCI ARM Retry > ... > Disable workflow."
-            exit 1
-          }
-          echo "Workflow auto-disabled"
-
-      - name: Stop chain on script error
-        if: steps.run_script.outcome != 'success' && steps.run_script.outputs.exit_code != '124'
-        env:
-          EXIT_CODE: ${{ steps.run_script.outputs.exit_code }}
-        run: |
-          echo "::error title=Script error::The retry script stopped with exit code $EXIT_CODE before its time limit, so the next Job was not triggered. Check the 'Run OCI retry script' log (e.g. secrets or OCIDs), fix the problem, then click Run workflow again."
-          exit 1
-
-      - name: Trigger next Job (seamless relay)
-        if: steps.run_script.outputs.exit_code == '124'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          REF: ${{ github.ref_name }}   # Relay on the same branch this run started from
-        run: |
-          # Retry up to 3 times so a brief GitHub API error doesn't end the chain
-          for attempt in 1 2 3; do
-            if curl -fsS -X POST \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/$REPO/actions/workflows/oci_retry.yml/dispatches" \
-              -d "{\"ref\":\"$REF\"}"; then
-              echo "Next Job triggered on $REF"
-              exit 0
-            fi
-            echo "Dispatch attempt $attempt failed" >&2
-            if [ "$attempt" -lt 3 ]; then sleep 15; fi
-          done
-          echo "::error title=Relay failed::Could not trigger the next Job after 3 attempts, so the retry chain has stopped. Restart it manually: Actions tab > OCI ARM Retry > Run workflow."
-          exit 1
+          OCI_USER: ${{ secrets.OCI_USER }}
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
+          OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
+          OCI_KEY_FILE: "key.pem"
+        run: python oci_retry.py
