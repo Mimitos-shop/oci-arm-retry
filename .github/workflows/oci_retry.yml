@@ -1,14 +1,14 @@
 name: OCI ARM Retry
 
 on:
-  workflow_dispatch: # Permite iniciarlo manualmente cuando quieras
+  workflow_dispatch: # Botón para iniciarlo a mano
   schedule:
-    - cron: '*/15 * * * *' # Se ejecuta automáticamente cada 15 minutos
+    - cron: '*/15 * * * *' # Se ejecuta solo cada 15 minutos
 
 jobs:
   retry:
     runs-on: ubuntu-latest
-    timeout-minutes: 350 # Evita que la ejecución se quede colgada más de 5h 50m
+    timeout-minutes: 350 # Evita que se quede colgado más de 5h 50m
 
     steps:
       - name: Checkout code
@@ -42,7 +42,7 @@ jobs:
               pem = base64.b64decode(encoded, validate=True)
               load_pem_private_key(pem, password=None)
           except Exception as e:
-              raise SystemExit("ERROR: No se pudo decodificar o validar la clave privada: " + type(e).__name__)
+              raise SystemExit("ERROR: No se pudo decodificar o validar la clave privada: " + type(e)._name_)
           key_path = Path.home() / ".oci/oci_api_key.pem"
           key_path.write_bytes(pem)
           os.chmod(key_path, 0o600)
@@ -72,8 +72,16 @@ jobs:
   keepalive:
     runs-on: ubuntu-latest
     permissions:
-      actions: write
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: gautamkrishnar/keepalive-workflow@v2
+      - name: Keep repo active
+        run: |
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          git commit --allow-empty -m "Keep Alive - actualización automática"
+          git push
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          git commit --allow-empty -m "Keep Alive - actualización automática"
+          git pu
