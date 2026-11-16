@@ -84,4 +84,4 @@ jobs:
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
           git commit --allow-empty -m "Keep Alive - actualización automática"
-          git pu
+          git push
